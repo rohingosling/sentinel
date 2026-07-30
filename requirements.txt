@@ -1,0 +1,54 @@
+# Sentinel runtime dependencies.
+#
+# Authoritative source is pyproject.toml's [project] dependencies table; this file
+# mirrors it for the embedded Python distribution, which has no venv and installs
+# packages in place (architecture Decision 1). Keep the two in step -- a package present
+# in one and absent from the other produces an installed product that differs from every
+# developer's checkout, which is the hardest class of bug to reproduce.
+#
+# Every entry must have a Windows wheel or be pure Python -- clear the
+# bundleability audit (architecture 6.8) before adding anything.
+
+# Phase 0 -- configuration, storage, and the working-memory cache.
+
+pydantic>=2.7
+PyYAML>=6.0
+aiosqlite>=0.20
+sqlite-vec>=0.1.6
+diskcache>=5.6
+
+# Phase 1 -- the API gateway, the LLM adapter, and credential storage. `anthropic` brings
+# streaming, retries, count_tokens, and the cache_read_input_tokens usage fields; httpx
+# arrives with it and is reused for the Ollama fallback.
+#
+# tzdata is required, not optional, on Windows: the OS ships no zone database, so every
+# zoneinfo lookup raises without it -- including ZoneInfo("UTC").
+
+anthropic>=0.40
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+keyring>=25.0
+tzdata>=2024.1
+
+# Phase 3 -- local ONNX embeddings (Decision 2). Brings `onnxruntime`, which Piper TTS
+# needs in Phase 11 regardless. The ~90 MB all-MiniLM-L6-v2 model is not a package: it
+# downloads on first use into ${SENTINEL_DATA}/models, and the installer bundles it.
+
+fastembed>=0.4
+
+# Phase 4 -- in-process scheduler for the heartbeat tick, and the cron parser behind the job
+# schedule. No broker, no external daemon. Pinned below 4.0: APScheduler 4 is a rewrite with
+# an incompatible API, so an unpinned floor would break on its release rather than on ours.
+
+APScheduler>=3.10,<4
+
+# Phase 2 -- the graphical surface. An optional extra in pyproject.toml (`sentinel[ui]`),
+# not a base dependency: Open WebUI's tree is 300-500 MB and a plain `pip install .` must
+# stay fast. The installer's embedded distribution DOES need both.
+#
+# pywebview must be pinned at >=6: a wheels-only resolution silently backtracks to 3.4,
+# because its proxy_tools dependency is sdist-only. Permit sdists for pure-Python packages.
+#
+#open-webui>=0.5
+#pywebview>=6
