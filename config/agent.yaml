@@ -1,0 +1,178 @@
+# Sentinel agent configuration.
+#
+# Every value below is the built-in default. Deleting a key does not disable the
+# setting -- it restores the default and lets the default track future releases,
+# which is usually what you want. An unknown key is a hard error rather than a
+# silent no-op, so a typo tells you about itself.
+#
+# Credentials never appear here. API keys, mailbox passwords, and channel tokens
+# live in the OS keyring.
+
+agent:
+  name:     "Sentinel"
+  timezone: "UTC"
+  language: "en"
+
+# Primary model and optional local fallback. The fallback is off by default because
+# it needs Ollama running locally, which most installs will not have.
+
+llm:
+  provider:          "anthropic"
+  model:             "claude-opus-5"
+  max_tokens:        4096
+  temperature:       1.0
+  request_timeout:   120
+  fallback_enabled:  false
+  fallback_provider: "ollama"
+  fallback_model:    "qwen2.5:7b-instruct"   # llama3.1:8b is the obvious alternative.
+
+# Sentinel's own API and the Open WebUI subprocess it points at. Both bind to
+# loopback -- nothing here is meant to be reachable from the network.
+
+api:
+  host:       "127.0.0.1"
+  port:       8000
+  webui_port: 8080
+  auth_required: true                 # Reject unauthenticated calls with 401. Leave on:
+                                      # loopback is not a trust boundary on a shared machine.
+  rate_limit:
+    enabled:  true
+    requests: 60                      # Requests permitted per window, per client.
+    window:   60                      # Window length, seconds.
+
+# The user-facing surface (architecture 4.2, 4.3.6). These switches decide which
+# pieces of the interface run; what the interface looks like when it does run is in
+# config/webui.env.
+
+ui:
+  webui_enabled:    true              # Start the managed Open WebUI subprocess.
+  native_window:    true              # Open the chromeless pywebview desktop window.
+  browser_fallback: true              # Use a browser in app mode when no WebView2 is
+                                      # available. Turn off to fail visibly instead.
+  window_title:     "Sentinel"        # Title bar and taskbar name -- what the user sees.
+  window_width:     1200
+  window_height:    800
+
+# Component recovery policy for the process lifecycle FSM (architecture 4.3.5).
+# Raise startup_timeout on a slow machine; the rest are rarely worth changing.
+
+process:
+  max_retries:           3            # Restarts per component before the system goes FATAL.
+  retry_window:          300          # Seconds of health after which the counter resets.
+  health_check_interval: 10           # Seconds between steady-state probes. An outright
+                                      # subprocess exit is detected at once, not on this tick.
+  startup_timeout:       120          # Seconds a component has to become healthy. Open WebUI
+                                      # downloads a ~90 MB embedding model on its first run;
+                                      # a measured cold start took ~50 s on a fast link.
+  shutdown_timeout:      10           # Seconds to exit gracefully before being killed.
+
+# SQLite tuning (architecture 6.6). A relative path resolves against the data
+# directory, not the working directory.
+
+database:
+  path:               "./data/sentinel.db"
+  wal_mode:           true              # Concurrent reads during writes.
+  journal_size_limit: 67108864          # 64 MB WAL cap.
+  busy_timeout:       5000              # 5 s retry on lock contention.
+  vector_dimensions:  384               # all-MiniLM-L6-v2 width. MUST match the
+                                        # embedding model -- a mismatch corrupts
+                                        # vector search silently.
+  embedding_model:    "all-MiniLM-L6-v2"
+  backup:
+    enabled:  true
+    interval: 3600                      # Hourly file-copy snapshot.
+    retain:   168                       # Seven days of hourly snapshots.
+
+# Hard limits on the agentic loop (architecture 3.3). These are the stop conditions
+# for a runaway agent, not performance tuning.
+
+loop:
+  max_iterations:   10                  # Ceiling on tool-use cycles per turn.
+  loop_timeout:     120                 # Wall-clock seconds for the whole loop.
+  tool_timeout:     30                  # Seconds for any single tool call.
+  max_total_tokens: 180000              # Context budget. A cost guard, not a model limit --
+                                        # current Claude models expose a 1M-token window.
+  max_tool_result:  16000               # Tokens per tool result before truncation.
+  retry_attempts:   3                   # LLM call attempts before giving up.
+  retry_backoff:    1.0                 # Seconds before retry 1; doubles thereafter (1/2/4).
+
+# Per-section token budgets for the assembled system prompt (architecture 3.3.5). No single
+# source may consume the whole window, so each is truncated to its own ceiling.
+
+prompt:
+  max_total:      4500                  # Whole system prompt.
+  max_persona:    500                   # Stable: identity and traits.
+  max_permissions: 200                  # Stable: what the agent may and may not do.
+  max_preferences: 500                  # Stable: learned user preferences.
+  max_memory:     2000                  # Volatile: retrieved memories.
+  max_channel:    200                   # Volatile: originating channel context.
+  max_heartbeat:  300                   # Volatile: pending scheduled work.
+
+# Autonomous wake-up tick. The 240 s interval sits below the 300 s prompt-cache TTL
+# so each tick re-uses the cached stable prefix instead of paying to rebuild it.
+
+heartbeat:
+  enabled:  true
+  interval: 240
+
+  # Guardrails on unsupervised work (architecture 3.3.9). The ceilings are lower than the
+  # interactive ones because nobody is watching: a runaway interactive turn is interrupted
+  # by the person reading it, and a runaway autonomous one is not.
+  #
+  # allowed_tools is default-deny. An empty list means an autonomous turn may call no tools
+  # at all -- it can still think and answer, but not act on the world. Add tool names here
+  # deliberately, one at a time.
+
+  max_autonomous_actions: 5             # Actions per tick, across tasks, jobs, and signals.
+  max_iterations:         3             # Tool-use cycles per autonomous turn. Interactive is 10.
+  allowed_tools:          []            # Tools an autonomous turn may call. Empty denies all.
+
+# Three-tier memory sizing and unified retrieval (architecture 3.2.4). The last three
+# values are the retrieval algorithm's theta, lambda, and tau_half.
+
+memory:
+  working_ttl:         3600             # Tier 1 entry lifetime, seconds.
+  working_size_limit:  268435456        # Tier 1 cache ceiling, 256 MB.
+  episodic_retention:  90               # Tier 2 retention, days.
+  retrieval_limit:     10               # Memories injected per prompt (k).
+  relevance_threshold: 0.72             # Minimum cosine similarity for a semantic match.
+                                        # Raise it for stricter recall, lower it if the
+                                        # agent keeps failing to remember relevant things.
+  recency_weight:      0.3              # Share of the blended score given to recency.
+                                        # 0.0 ranks on meaning alone; 1.0 on age alone.
+  recency_half_life:   7.0              # Days after which recency has halved.
+
+# Two logs are configured here and they are different things. `level` and `json_output`
+# govern the operator log -- the console lines saying what the process is doing.
+# Everything after them governs the event log: the append-only audit trail of what the
+# agent did (architecture 3.2.10), its rotating file copy, and its optional metrics.
+#
+# `retention` applies to the ROTATED FILES only. The event_log table is append-only at the
+# storage layer -- migration 003 installs triggers that refuse UPDATE and DELETE -- so its
+# rows are never pruned. An audit trail the audited process can quietly shorten is not one.
+
+logging:
+  level:       "INFO"
+  json_output: true
+  retention:   30                       # Rotated event-log file retention, days. 0 keeps for ever.
+
+  event_log_enabled:  true              # Persist events to the event_log table.
+  file_export:        true              # Write the rotating JSON Lines copy under logs\.
+  stdout_export:      false             # Echo every event to the console. Development only --
+                                        # it doubles the console output in normal use.
+  max_file_size:      10485760          # 10 MB. The live file rotates to a timestamped name
+                                        # at this size. 0 disables rotation entirely.
+  prometheus_enabled: false             # Count events by category and serve GET /metrics.
+  query_limit:        1000              # Ceiling on rows one GET /api/logs call returns.
+
+# Communication channels. Empty by default -- the agent is chat-only until you add
+# one. Each entry requires a name and a type; the options block is channel-specific.
+#
+# channels:
+#   - name:    "personal-email"
+#     type:    "email"
+#     enabled: true
+#     options:
+#       poll_interval: 60
+
+channels: []

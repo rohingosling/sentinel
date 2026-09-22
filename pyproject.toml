@@ -1,0 +1,210 @@
+[build-system]
+requires      = [ "hatchling" ]
+build-backend = "hatchling.build"
+
+[project]
+name            = "sentinel"
+version         = "0.1.0"
+description     = "A secure, self-evolving personal AI agent with zero external daemons."
+readme          = "README.md"
+license         = { file = "LICENSE" }
+requires-python = ">=3.12,<3.13"
+authors         = [ { name = "Rohin Gosling" } ]
+keywords        = [ "ai", "agent", "assistant", "claude", "autonomous" ]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Phase 0-1 dependency set. Later phases add their own. Every addition must clear
+# the bundleability audit (architecture 6.8): a Windows wheel or pure Python, no
+# system-wide prerequisite, no external daemon.
+
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    "aiosqlite>=0.20",
+    "sqlite-vec>=0.1.6",
+    "diskcache>=5.6",
+
+    # Phase 1. `anthropic` brings streaming, retries, count_tokens, and the
+    # cache_read_input_tokens usage fields; httpx arrives with it and is reused for
+    # the Ollama fallback. `keyring` keeps credentials out of the tree entirely.
+
+    "anthropic>=0.40",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "keyring>=25.0",
+
+    # Windows ships no system timezone database, so zoneinfo has nothing to read and every
+    # ZoneInfo lookup raises -- including ZoneInfo("UTC"). Pure Python, no prerequisite.
+
+    "tzdata>=2024.1",
+
+    # Phase 3. Local ONNX embeddings (Decision 2). A base dependency rather than an extra,
+    # unlike the Phase 2 graphical stack: memory is not an optional feature of the agent, and
+    # a Sentinel that cannot embed cannot retrieve. It brings `onnxruntime`, which the Piper
+    # TTS work in Phase 11 needs anyway, so the runtime is paid for once.
+    #
+    # The ~90 MB all-MiniLM-L6-v2 model is NOT a pip dependency -- it downloads on first use
+    # into ${SENTINEL_DATA}/models and is bundled by the installer in Phase 10.
+
+    "fastembed>=0.4",
+
+    # Phase 4. In-process scheduler for the heartbeat tick and the cron parser behind the
+    # job schedule. Pure Python, ~150 KB, no broker and no external daemon (architecture 6.8).
+    #
+    # Pinned below 4.0 deliberately: APScheduler 4 is a rewrite with an incompatible API
+    # (`AsyncScheduler`, a different trigger module layout, and no `from_crontab`), so an
+    # unpinned floor would break the build on its release rather than at a time of our choosing.
+
+    "APScheduler>=3.10,<4",
+]
+
+[project.optional-dependencies]
+
+# Phase 2. The graphical surface, kept out of the base dependency set on purpose: Open
+# WebUI's tree is 300-500 MB, and a plain `pip install .` -- which is what the clean-room
+# publish verification runs -- must stay fast and offline-friendly. The shipped installer
+# installs this extra; a developer wanting only the API does not have to.
+#
+# pywebview MUST be pinned at >=6. A wheels-only resolution silently backtracks to 3.4,
+# a six-year-old release, because pywebview 6.x depends on proxy_tools, which is
+# sdist-only on PyPI. Pip does not error; it just ships an ancient window backend.
+
+ui = [
+    "open-webui>=0.5",
+    "pywebview>=6",
+]
+
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "types-PyYAML>=6.0",
+
+    # Phase 1. `jsonschema` validates responses against the OpenAI wire schema
+    # (T1.08); `keyrings.alt` supplies the in-memory backend the suite installs so
+    # no test can reach the developer's real Credential Manager.
+
+    "jsonschema>=4.21",
+    "keyrings.alt>=5.0",
+]
+
+[project.scripts]
+sentinel = "sentinel.main:main"
+
+[project.urls]
+Homepage = "https://github.com/rohingosling/sentinel"
+
+[tool.hatch.build.targets.wheel]
+packages = [ "src/sentinel" ]
+
+# The repository's top-level config/ does not survive installation, so the starter
+# agent.yaml is carried inside the package. One file, two locations at build time --
+# never two copies in the source tree.
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/agent.yaml"                 = "sentinel/_templates/agent.yaml"
+"config/webui.env"                  = "sentinel/_templates/webui.env"
+"assets/images/sentinel-avatar.png" = "sentinel/_templates/sentinel-avatar.png"
+
+# Phase 3. The schema lives in migrations/ at the top level for the same reason config/
+# does, and survives installation the same way. Without this the installed package has no
+# schema at all and `sentinel init` creates an empty database.
+
+"migrations"                        = "sentinel/_migrations"
+
+[tool.pytest.ini_options]
+testpaths        = [ "tests" ]
+asyncio_mode     = "auto"
+filterwarnings   = [ "error::DeprecationWarning" ]
+markers = [
+    "automated: runnable unattended by CI or an agent",
+    "manual: requires a human operator",
+    "vm_required: requires a disposable virtual machine",
+    "live: calls the real Anthropic API; needs ANTHROPIC_API_KEY and SENTINEL_LIVE_TESTS=1",
+]
+
+[tool.coverage.run]
+source = [ "src/sentinel" ]
+
+[tool.coverage.report]
+fail_under = 80
+
+[tool.ruff]
+line-length    = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [ "E", "F", "N", "UP", "B", "S", "ASYNC" ]
+ignore = [
+    "I001",   # Import sorting -- imports are column-aligned by hand (coding-standards 3.4).
+    "ASYNC240", # pathlib in async -- only at startup, and Sentinel is asyncio, not trio/anyio.
+    "ASYNC109", # `timeout` parameter -- the rule targets trio's cancel scopes; these are plain
+                # deadline arguments on asyncio helpers, and asyncio.timeout is used where it applies.
+    "E201",   # Whitespace after '(' -- required by the house spaced style.
+    "E202",   # Whitespace before ')' -- required by the house spaced style.
+    "E203",   # Whitespace before ':' -- required by the house spaced style.
+    "E211",   # Whitespace before '(' -- required by the house spaced style.
+    "E221",   # Multiple spaces before operator -- columnar alignment.
+    "E241",   # Multiple spaces after comma -- columnar alignment.
+    "E251",   # Spaces around keyword '=' -- required by the house spaced style.
+    "E252",   # Spaces around annotated default '=' -- required by the house spaced style.
+]
+
+[tool.ruff.lint.per-file-ignores]
+
+# S608 flags any SQL assembled with an f-string. In these two modules the only interpolated
+# fragments are the module-level table and column-list constants (EPISODE_COLUMNS,
+# VECTOR_TABLE, VECTOR_COLUMNS) and a fixed set of predicate literals -- never a value, and
+# never anything derived from input. Every value travels as a bound parameter, which is the
+# hard rule the project actually cares about.
+#
+# The constants are held to that promise by a test rather than by convention:
+# tests/phase3/test_sql_safety.py asserts each one is a plain identifier list, so a later
+# edit that made one of them dynamic fails the suite instead of opening an injection path.
+
+"src/sentinel/memory/episodic.py" = [ "S608" ]
+"src/sentinel/memory/semantic.py" = [ "S608" ]
+
+"tests/**" = [
+    "S608",   # The SQL-safety suite necessarily builds the same constant-interpolated queries
+              # it exists to prove are safe, and stores hostile literals as bound values.
+    "S101",   # assert is the point of a test.
+    "S105",   # Fixed token literals in tests are fixtures, not credentials. Real secrets
+              # live in the OS keyring, and the suite runs against an in-memory backend.
+    "S106",   # Same, passed as an argument rather than assigned.
+]
+
+[tool.mypy]
+python_version         = "3.12"
+strict                 = true
+files                  = [ "src/sentinel" ]
+warn_unreachable       = true
+disallow_any_generics  = true
+
+# diskcache, sqlite-vec, fastembed, and APScheduler ship no usable type information. Each is
+# wrapped by a single Sentinel module, so the untyped surface stops at that boundary --
+# APScheduler by core/scheduler.py for cron parsing and core/heartbeat.py for the tick timer.
+
+[[tool.mypy.overrides]]
+module                 = [ "diskcache.*", "sqlite_vec.*", "fastembed.*", "apscheduler.*" ]
+ignore_missing_imports = true
+
+# pywebview ships no type information and is an optional dependency -- on a machine without
+# the `ui` extra there is nothing to check against at all. Its use is confined to
+# core/window.py, which is written to treat the import failing as a normal condition.
+
+[[tool.mypy.overrides]]
+module                 = [ "webview.*" ]
+ignore_missing_imports = true
